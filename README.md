@@ -1,3 +1,4 @@
+# Market Signal Monitor
 Market Signal Monitor is a real-time market news website that surfaces breaking financial and macro signals in a live React dashboard.
 
 The project combines a Python backend and React frontend to ingest recent market-moving stories, rank and deduplicate them, and stream them to the UI over WebSocket as animated alert cards.
