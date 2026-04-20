@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from market_data import fetch_market_sets
+from market_data import fetch_market_sets, get_market_cache_source
 
 load_dotenv()
 
@@ -38,7 +38,11 @@ async def health() -> dict:
 @app.get("/api/market-movers")
 async def market_movers() -> dict:
     market_sets = fetch_market_sets()
-    return {"results": market_sets.get("popular", []), "sets": market_sets}
+    return {
+        "results": market_sets.get("popular", []),
+        "sets": market_sets,
+        "cache_source": get_market_cache_source(),
+    }
 
 
 if __name__ == "__main__":

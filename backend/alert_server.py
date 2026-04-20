@@ -13,58 +13,52 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
-from market_data import fetch_market_sets
+from analytics import build_signal_summary
+from market_data import fetch_market_sets, get_market_cache_source
 from ollama_enricher import OllamaEnricher
 from ollama_enricher import enrich_posts_with_fallback
+from postgres_cache import PostgresSignalCache
 from reddit_scraper import (
     MARKET_SUBREDDIT_CATALOG,
     RedditPost,
     RedditScraper,
     filter_allowed_market_subreddits,
 )
+from schemas import (
+    AnalyticsSummaryResponse,
+    AssistantChatPayload,
+    HealthResponse,
+    LatestSignalsResponse,
+    SerializedPost,
+    WatchlistPayload,
+)
+from settings import DEFAULT_SUBREDDITS, BackendSettings
 from signal_engine import SignalConfig, SignalEngine
 
 load_dotenv()
 
+settings = BackendSettings.from_env()
 
-DEFAULT_SUBREDDITS = ["stocks", "investing", "economics", "cryptocurrency"]
-
-
-def _parse_bool(value: str | None, default: bool = False) -> bool:
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-SUBREDDITS = [
-    s.strip()
-    for s in os.getenv("SUBREDDITS", ",".join(DEFAULT_SUBREDDITS)).split(",")
-    if s.strip()
-]
-POSTS_PER_SUBREDDIT = int(os.getenv("POSTS_PER_SUBREDDIT", "200"))
-TOP_POSTS_LIMIT = int(os.getenv("TOP_POSTS_LIMIT", "20"))
-POLL_SECONDS = float(os.getenv("POLL_SECONDS", "5"))
-USE_MOCK_DATA = _parse_bool(os.getenv("USE_MOCK_DATA"), default=False)
-REDDIT_FETCH_CACHE_SECONDS = float(os.getenv("REDDIT_FETCH_CACHE_SECONDS", "20"))
-OLLAMA_ENABLED = _parse_bool(os.getenv("OLLAMA_ENABLED"), default=False)
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b").strip() or "llama3.1:8b"
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434"
-OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "20"))
-OLLAMA_CHAT_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_CHAT_TIMEOUT_SECONDS", "8"))
-MARKET_CHAT_TIMEOUT_SECONDS = float(os.getenv("MARKET_CHAT_TIMEOUT_SECONDS", "1.5"))
-OLLAMA_MIN_CONFIDENCE = float(os.getenv("OLLAMA_MIN_CONFIDENCE", "0.55"))
-CORS_ALLOW_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("CORS_ALLOW_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(",")
-    if origin.strip()
-]
+SUBREDDITS = list(settings.subreddits)
+POSTS_PER_SUBREDDIT = settings.posts_per_subreddit
+TOP_POSTS_LIMIT = settings.top_posts_limit
+POLL_SECONDS = settings.poll_seconds
+USE_MOCK_DATA = settings.use_mock_data
+REDDIT_FETCH_CACHE_SECONDS = settings.reddit_fetch_cache_seconds
+OLLAMA_ENABLED = settings.ollama_enabled
+OLLAMA_MODEL = settings.ollama_model
+OLLAMA_BASE_URL = settings.ollama_base_url
+OLLAMA_TIMEOUT_SECONDS = settings.ollama_timeout_seconds
+OLLAMA_CHAT_TIMEOUT_SECONDS = settings.ollama_chat_timeout_seconds
+MARKET_CHAT_TIMEOUT_SECONDS = settings.market_chat_timeout_seconds
+OLLAMA_MIN_CONFIDENCE = settings.ollama_min_confidence
+CORS_ALLOW_ORIGINS = list(settings.cors_allow_origins)
 
 signal_engine = SignalEngine(
     SignalConfig(
         top_posts_per_cycle=TOP_POSTS_LIMIT,
-        max_processed_posts=int(os.getenv("MAX_PROCESSED_POSTS", "10000")),
+        max_processed_posts=settings.max_processed_posts,
     )
 )
 
@@ -117,9 +111,14 @@ class AlertHub:
 hub = AlertHub()
 reddit_scraper: RedditScraper | None = None
 ollama_enricher: OllamaEnricher | None = None
+postgres_cache = PostgresSignalCache(
+    settings.postgres_cache_dsn,
+    max_rows=settings.postgres_cache_max_rows,
+)
 latest_posts: list[RedditPost] = []
 latest_posts_lock = asyncio.Lock()
 latest_reddit_error = ""
+latest_cache_source = "live"
 reddit_fetch_cache: dict[str, object] = {
     "subreddits": [],
     "fetched_at": 0.0,
@@ -134,6 +133,15 @@ def _normalize_subreddits(values: list[str] | None) -> list[str]:
 
     normalized = filter_allowed_market_subreddits(values)
     return normalized
+
+
+def _set_latest_cache_source(source: str) -> None:
+    global latest_cache_source
+    latest_cache_source = source
+
+
+def _get_latest_cache_source() -> str:
+    return latest_cache_source
 
 
 class WatchlistState:
@@ -153,20 +161,6 @@ class WatchlistState:
 
 
 watchlist_state = WatchlistState(SUBREDDITS)
-
-
-class WatchlistPayload(BaseModel):
-    subreddits: list[str]
-
-
-class AssistantMessagePayload(BaseModel):
-    role: str
-    content: str
-
-
-class AssistantChatPayload(BaseModel):
-    message: str
-    history: list[AssistantMessagePayload] = []
 
 
 def _build_reddit_scraper() -> RedditScraper:
@@ -199,31 +193,7 @@ def _build_ollama_enricher() -> OllamaEnricher:
 
 
 def _serialize_post(post: RedditPost) -> dict:
-    return {
-        "id": post.post_id,
-        "title": post.title,
-        "body_text": post.body_text,
-        "subreddit": post.subreddit,
-        "author": post.username,
-        "username": post.username,
-        "upvotes": post.score,
-        "comments": post.comment_count,
-        "comment_count": post.comment_count,
-        "thumbnail_url": post.thumbnail_url,
-        "image": post.thumbnail_url,
-        "article_link": post.article_link,
-        "permalink": post.permalink,
-        "post_url": post.post_url,
-        "created_utc": post.created_utc,
-        "timestamp": post.created_at_iso,
-        "signal_score": round(post.signal_score, 2),
-        "ai_summary": post.ai_summary,
-        "ai_sector": post.ai_sector,
-        "ai_reason": post.ai_reason,
-        "ai_confidence": round(post.ai_confidence, 3),
-        "ai_market_relevant": post.ai_market_relevant,
-        "ai_tickers": list(post.ai_tickers),
-    }
+    return SerializedPost.from_post(post).model_dump()
 
 
 async def _set_latest_posts(posts: list[RedditPost]) -> None:
@@ -252,7 +222,7 @@ async def _get_latest_post_objects() -> list[RedditPost]:
 
 def _truncate_text(value: str, limit: int) -> str:
     compact = " ".join(str(value or "").split())
-    return compact if len(compact) <= limit else f"{compact[: limit - 1].rstrip()}…"
+    return compact if len(compact) <= limit else f"{compact[: limit - 3].rstrip()}..."
 
 
 def _format_context_post(post: RedditPost) -> str:
@@ -305,6 +275,9 @@ def _build_assistant_system_prompt(
         "Speak like a quantitative analyst or market strategist: concise, practical, and grounded in evidence.\n"
         "Answer the user's question directly. Do not just restate the feed unless they explicitly ask for a recap.\n"
         "Use only the supplied context. If the context is insufficient, say that directly and explain what is missing.\n"
+        "When possible, structure responses in this order: Setup, What to watch next, Risk/Invalidation.\n"
+        "Prefer concrete signals and levels over generic statements.\n"
+        "If asked a yes/no investing question, do not answer with a binary; provide conditional triggers and risks.\n"
         "Do not claim certainty, do not promise returns, and do not present yourself as retraining on user input.\n"
         "When asked what to focus on or invest in, prioritize 1 to 3 watch items only if the context supports them.\n"
         "For each idea, explain:\n"
@@ -384,36 +357,43 @@ def _build_fast_assistant_reply(message: str, posts: list[RedditPost], tracked_t
     if "which stocks" in lowered or "benefits" in lowered or "invest" in lowered:
         if lead_tickers:
             return (
-                f"The first names I would watch from the current signal set are {lead_tickers}. "
-                f"The setup is being driven mainly by {lead_sector}, and the strongest headline right now is "
-                f"'{lead_title}'. I would treat these as watch items, not blind buys, and wait for follow-through."
+                f"Setup: Flow is centered on {lead_sector}, led by '{lead_title}'.\n"
+                f"Watch: {lead_tickers} only if the next signals confirm the same direction.\n"
+                f"Risk: If follow-through headlines weaken or rotate away from {lead_sector}, stand down."
             )
         return (
-            f"The current flow looks more {lead_sector}-driven than stock-specific. "
-            f"The lead signal is '{lead_title}', so I would focus on the sector and wait for cleaner company-level confirmation."
+            f"Setup: Current flow is more {lead_sector}-driven than single-name driven.\n"
+            f"Watch: Wait for repeated company-level signals before taking stock-specific risk.\n"
+            f"Risk: If this stays macro-only, single-name entries can be noisy and fade quickly."
         )
 
     if "trade thesis" in lowered or "thesis" in lowered:
         return (
-            f"The live thesis is that {lead_sector} is being moved by the current headline flow, led by '{lead_title}'. "
-            f"If follow-through headlines confirm the move, the trade is continuation; if the news fades quickly, the move can unwind just as fast."
+            f"Setup: {lead_sector} is being pushed by current headline flow, led by '{lead_title}'.\n"
+            f"What confirms: Additional aligned signals in the same direction over the next cycle.\n"
+            f"Invalidation: Headline contradiction or rapid signal rotation to another theme."
         )
 
     if "watch next" in lowered:
         return (
-            f"Next I would watch whether new headlines reinforce '{lead_title}', whether other {lead_sector} stories start clustering, "
-            f"and whether any company-specific names begin showing up instead of just macro signal flow."
+            f"Watch next:\n"
+            f"- Whether new headlines reinforce '{lead_title}'.\n"
+            f"- Whether more {lead_sector} stories cluster in sequence.\n"
+            f"- Whether company-specific names start appearing instead of pure macro flow."
         )
 
     if "break" in lowered or "invalidate" in lowered:
         return (
-            f"What breaks this setup is the current signal flow losing follow-through. "
-            f"If the headline behind '{lead_title}' gets walked back, contradicted, or ignored by the next few signals, the thesis weakens quickly."
+            f"Invalidation signals:\n"
+            f"- Follow-through disappears after '{lead_title}'.\n"
+            f"- The headline is contradicted or walked back.\n"
+            f"- Flow rotates out of {lead_sector} into unrelated themes."
         )
 
     return (
-        f"The main thing happening right now is '{lead_title}', which is pushing attention toward {lead_sector}. "
-        f"If you want, I can turn that into a stock watchlist, a trade thesis, or a risk checklist."
+        f"Setup: '{lead_title}' is currently directing attention toward {lead_sector}.\n"
+        f"Next: I can turn this into a watchlist, trade thesis, or risk checklist.\n"
+        f"Risk: Treat this as conditional until the next signal cycle confirms."
     )
 
 
@@ -470,6 +450,7 @@ async def _fetch_current_posts(current_subreddits: list[str]) -> list[RedditPost
         and cached_subreddits == normalized_subreddits
         and (time.time() - cached_at) < REDDIT_FETCH_CACHE_SECONDS
     ):
+        _set_latest_cache_source("memory")
         return cached_posts
 
     if USE_MOCK_DATA:
@@ -497,18 +478,34 @@ async def _fetch_current_posts(current_subreddits: list[str]) -> list[RedditPost
 
     if filtered_posts:
         _set_latest_reddit_error("")
+        _set_latest_cache_source("live")
         reddit_fetch_cache["subreddits"] = normalized_subreddits
         reddit_fetch_cache["fetched_at"] = time.time()
         reddit_fetch_cache["posts"] = list(filtered_posts)
+        if postgres_cache.enabled:
+            await asyncio.to_thread(postgres_cache.cache_posts, filtered_posts)
         return filtered_posts
 
     if cached_posts and cached_subreddits == normalized_subreddits:
         _set_latest_reddit_error("")
+        _set_latest_cache_source("memory")
         return cached_posts
+
+    if postgres_cache.enabled:
+        postgres_posts = await asyncio.to_thread(
+            postgres_cache.fetch_posts,
+            current_subreddits,
+            settings.postgres_cache_read_limit,
+        )
+        if postgres_posts:
+            _set_latest_reddit_error("Serving cached posts from PostgreSQL while live sources recover.")
+            _set_latest_cache_source("postgres")
+            return postgres_posts
 
     if not USE_MOCK_DATA and reddit_scraper is not None:
         _set_latest_reddit_error(reddit_scraper.last_fetch_error)
 
+    _set_latest_cache_source("live")
     return []
 
 
@@ -520,6 +517,7 @@ async def _broadcast_posts_snapshot(posts: list[RedditPost]) -> None:
             "payload": {
                 "posts": await _get_latest_posts(),
                 "error": _get_latest_reddit_error(),
+                "cache_source": _get_latest_cache_source(),
             },
         }
     )
@@ -544,6 +542,8 @@ async def _monitor_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if settings.postgres_cache_enabled and postgres_cache.enabled:
+        await asyncio.to_thread(postgres_cache.initialize)
     task = asyncio.create_task(_monitor_loop())
     try:
         yield
@@ -553,7 +553,7 @@ async def lifespan(_: FastAPI):
             await task
 
 
-app = FastAPI(title="Market Signal Monitor API", lifespan=lifespan)
+app = FastAPI(title=f"{settings.app_name} API", lifespan=lifespan)
 
 allow_all_origins = CORS_ALLOW_ORIGINS == ["*"]
 app.add_middleware(
@@ -565,29 +565,53 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 async def health() -> dict:
     active_subreddits = await watchlist_state.get()
-    return {
-        "status": "ok",
-        "use_mock_data": USE_MOCK_DATA,
-        "ollama_enabled": OLLAMA_ENABLED,
-        "ollama_model": OLLAMA_MODEL if OLLAMA_ENABLED else "",
-        "reddit_error": _get_latest_reddit_error(),
-        "subreddits": active_subreddits,
-        "top_posts_limit": TOP_POSTS_LIMIT,
-        "connected_clients": await hub.count(),
-        "posts_cached": len(await _get_latest_posts()),
-    }
+    return HealthResponse(
+        app_name=settings.app_name,
+        status="ok",
+        use_mock_data=USE_MOCK_DATA,
+        ollama_enabled=OLLAMA_ENABLED,
+        ollama_model=OLLAMA_MODEL if OLLAMA_ENABLED else "",
+        reddit_error=_get_latest_reddit_error(),
+        subreddits=active_subreddits,
+        top_posts_limit=TOP_POSTS_LIMIT,
+        connected_clients=await hub.count(),
+        posts_cached=len(await _get_latest_posts()),
+        cache_source=_get_latest_cache_source(),
+        postgres_cache_enabled=settings.postgres_cache_enabled and postgres_cache.enabled,
+    ).model_dump()
 
 
-@app.get("/api/signals/latest")
+@app.get("/api/signals/latest", response_model=LatestSignalsResponse)
 async def latest_signals() -> dict:
-    return {
-        "posts": await _get_latest_posts(),
-        "error": _get_latest_reddit_error(),
-        "subreddits": await watchlist_state.get(),
-    }
+    posts = [SerializedPost.model_validate(item) for item in await _get_latest_posts()]
+    return LatestSignalsResponse(
+        posts=posts,
+        error=_get_latest_reddit_error(),
+        subreddits=await watchlist_state.get(),
+        cache_source=_get_latest_cache_source(),
+    ).model_dump()
+
+
+@app.get("/api/analytics/summary", response_model=AnalyticsSummaryResponse)
+async def analytics_summary() -> dict:
+    post_objects = await _get_latest_post_objects()
+    summary = await asyncio.to_thread(
+        build_signal_summary,
+        post_objects,
+        settings.pandas_group_limit,
+    )
+    return AnalyticsSummaryResponse(
+        tracked_subreddits=await watchlist_state.get(),
+        generated_at=summary["generated_at"],
+        cache_source=_get_latest_cache_source(),
+        totals=summary["totals"],
+        by_subreddit=summary["by_subreddit"],
+        by_sector=summary["by_sector"],
+        top_tickers=summary["top_tickers"],
+    ).model_dump()
 
 
 @app.post("/api/watchlist")
@@ -634,7 +658,11 @@ async def search_subreddits(q: str = "") -> dict:
 @app.get("/api/market-movers")
 async def market_movers() -> dict:
     market_sets = await asyncio.to_thread(fetch_market_sets)
-    return {"results": market_sets.get("popular", []), "sets": market_sets}
+    return {
+        "results": market_sets.get("popular", []),
+        "sets": market_sets,
+        "cache_source": get_market_cache_source(),
+    }
 
 
 @app.post("/api/assistant/chat")
@@ -728,6 +756,7 @@ async def alerts_socket(websocket: WebSocket) -> None:
                 "poll_seconds": POLL_SECONDS,
                 "posts": await _get_latest_posts(),
                 "error": _get_latest_reddit_error(),
+                "cache_source": _get_latest_cache_source(),
             },
         }
     )
