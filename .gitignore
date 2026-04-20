@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Backend env
+backend/.env
+backend/*.log
+backend/*.out.log
+backend/*.err.log
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# Browser profile/runtime files
+.edge-profile/
+
+# OS
+.DS_Store
+Thumbs.db
