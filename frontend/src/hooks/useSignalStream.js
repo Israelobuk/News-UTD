@@ -5,6 +5,10 @@ function resolveWebSocketUrl() {
     return import.meta.env.VITE_WS_URL;
   }
 
+  if (import.meta.env.VITE_WS_BASE_URL) {
+    return import.meta.env.VITE_WS_BASE_URL;
+  }
+
   if (import.meta.env.VITE_ALERT_WS_URL) {
     return import.meta.env.VITE_ALERT_WS_URL;
   }

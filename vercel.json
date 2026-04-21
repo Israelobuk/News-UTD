@@ -1,4 +1,14 @@
 {
+  "rewrites": [
+    {
+      "source": "/monitor",
+      "destination": "/"
+    },
+    {
+      "source": "/monitor/",
+      "destination": "/"
+    }
+  ],
   "experimentalServices": {
     "frontend": {
       "entrypoint": "frontend",
