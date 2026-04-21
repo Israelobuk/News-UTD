@@ -61,6 +61,10 @@ class BackendSettings(BaseModel):
             ).split(",")
             if origin.strip()
         ]
+        if "*" in raw_origins:
+            merged_origins = ["*"]
+        else:
+            merged_origins = list(dict.fromkeys([*raw_origins, *DEFAULT_CORS_ALLOW_ORIGINS]))
         postgres_cache_dsn = os.getenv("POSTGRES_CACHE_DSN", "").strip()
         postgres_cache_enabled = _parse_bool(
             os.getenv("POSTGRES_CACHE_ENABLED"),
@@ -84,7 +88,7 @@ class BackendSettings(BaseModel):
             ollama_chat_timeout_seconds=float(os.getenv("OLLAMA_CHAT_TIMEOUT_SECONDS", "8")),
             market_chat_timeout_seconds=float(os.getenv("MARKET_CHAT_TIMEOUT_SECONDS", "1.5")),
             ollama_min_confidence=float(os.getenv("OLLAMA_MIN_CONFIDENCE", "0.55")),
-            cors_allow_origins=raw_origins or list(DEFAULT_CORS_ALLOW_ORIGINS),
+            cors_allow_origins=merged_origins,
             postgres_cache_enabled=postgres_cache_enabled,
             postgres_cache_dsn=postgres_cache_dsn,
             postgres_cache_max_rows=max(500, int(os.getenv("POSTGRES_CACHE_MAX_ROWS", "5000"))),
