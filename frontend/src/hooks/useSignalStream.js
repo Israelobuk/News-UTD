@@ -1,12 +1,35 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+function normalizeWebSocketBaseUrl(rawBaseUrl) {
+  const input = String(rawBaseUrl || "").trim();
+  if (!input) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(input);
+    const socketProtocol =
+      parsed.protocol === "https:" || parsed.protocol === "wss:" ? "wss:" : "ws:";
+    const basePath = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/$/, "");
+    const wsPath = basePath.endsWith("/ws/alerts") ? basePath : `${basePath}/ws/alerts`;
+
+    parsed.protocol = socketProtocol;
+    parsed.pathname = wsPath;
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return input;
+  }
+}
+
 function resolveWebSocketUrl() {
   if (import.meta.env.VITE_WS_URL) {
     return import.meta.env.VITE_WS_URL;
   }
 
   if (import.meta.env.VITE_WS_BASE_URL) {
-    return import.meta.env.VITE_WS_BASE_URL;
+    return normalizeWebSocketBaseUrl(import.meta.env.VITE_WS_BASE_URL);
   }
 
   if (import.meta.env.VITE_ALERT_WS_URL) {
