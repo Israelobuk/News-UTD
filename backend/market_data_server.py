@@ -14,7 +14,10 @@ load_dotenv()
 
 CORS_ALLOW_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("CORS_ALLOW_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173").split(",")
+    for origin in os.getenv(
+        "CORS_ALLOW_ORIGINS",
+        "https://newsutd.vercel.app,http://127.0.0.1:5173,http://localhost:5173",
+    ).split(",")
     if origin.strip()
 ]
 

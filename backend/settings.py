@@ -8,6 +8,11 @@ from pydantic import BaseModel, Field
 
 
 DEFAULT_SUBREDDITS = ["stocks", "investing", "economics", "cryptocurrency"]
+DEFAULT_CORS_ALLOW_ORIGINS = [
+    "https://newsutd.vercel.app",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+]
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
@@ -34,9 +39,7 @@ class BackendSettings(BaseModel):
     ollama_chat_timeout_seconds: float = 8.0
     market_chat_timeout_seconds: float = 1.5
     ollama_min_confidence: float = 0.55
-    cors_allow_origins: list[str] = Field(
-        default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"]
-    )
+    cors_allow_origins: list[str] = Field(default_factory=lambda: list(DEFAULT_CORS_ALLOW_ORIGINS))
     postgres_cache_enabled: bool = False
     postgres_cache_dsn: str = ""
     postgres_cache_max_rows: int = 5000
@@ -54,7 +57,7 @@ class BackendSettings(BaseModel):
             origin.strip()
             for origin in os.getenv(
                 "CORS_ALLOW_ORIGINS",
-                "http://127.0.0.1:5173,http://localhost:5173",
+                ",".join(DEFAULT_CORS_ALLOW_ORIGINS),
             ).split(",")
             if origin.strip()
         ]
@@ -81,7 +84,7 @@ class BackendSettings(BaseModel):
             ollama_chat_timeout_seconds=float(os.getenv("OLLAMA_CHAT_TIMEOUT_SECONDS", "8")),
             market_chat_timeout_seconds=float(os.getenv("MARKET_CHAT_TIMEOUT_SECONDS", "1.5")),
             ollama_min_confidence=float(os.getenv("OLLAMA_MIN_CONFIDENCE", "0.55")),
-            cors_allow_origins=raw_origins or ["http://127.0.0.1:5173", "http://localhost:5173"],
+            cors_allow_origins=raw_origins or list(DEFAULT_CORS_ALLOW_ORIGINS),
             postgres_cache_enabled=postgres_cache_enabled,
             postgres_cache_dsn=postgres_cache_dsn,
             postgres_cache_max_rows=max(500, int(os.getenv("POSTGRES_CACHE_MAX_ROWS", "5000"))),
