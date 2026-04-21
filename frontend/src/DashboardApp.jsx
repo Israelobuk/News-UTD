@@ -11,7 +11,7 @@ function resolveBackendBaseUrl() {
   if (isLocalDev) {
     return `${window.location.protocol}//${window.location.hostname}:8000`;
   }
-  return `${window.location.protocol}//${window.location.host}`;
+  return `${window.location.protocol}//${window.location.host}/_/backend`;
 }
 
 function resolveWebSocketUrl() {
@@ -26,7 +26,7 @@ function resolveWebSocketUrl() {
   if (isLocalDev) {
     return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8000/ws/alerts`;
   }
-  return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/alerts`;
+  return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/_/backend/ws/alerts`;
 }
 
 const API_BASE_URL = resolveBackendBaseUrl();

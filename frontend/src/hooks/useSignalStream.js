@@ -9,7 +9,11 @@ function resolveWebSocketUrl() {
     return import.meta.env.VITE_ALERT_WS_URL;
   }
 
-  return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws/alerts`;
+  const isLocalDev = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+  if (isLocalDev) {
+    return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:8000/ws/alerts`;
+  }
+  return `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/_/backend/ws/alerts`;
 }
 
 const WS_URL = resolveWebSocketUrl();

@@ -91,7 +91,7 @@ function resolveBackendBaseUrl() {
   if (isLocalDev) {
     return `${window.location.protocol}//${window.location.hostname}:8000`;
   }
-  return `${window.location.protocol}//${window.location.host}`;
+  return `${window.location.protocol}//${window.location.host}/_/backend`;
 }
 
 const SUBREDDIT_SEARCH_URL = `${resolveBackendBaseUrl()}/api/subreddits/search`;
